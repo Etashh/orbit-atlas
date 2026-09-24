@@ -11,6 +11,12 @@ npm install
 npm run dev
 ```
 
+## Live site
+
+Once the `Deploy to GitHub Pages` workflow completes, the site is available at:
+
+https://etashh.github.io/orbit-atlas/
+
 ## Data source
 
 - [CelesTrak GP API](https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json) for current active-object orbital data. The browser requests this public endpoint directly, so no visitor login or API key is needed.
