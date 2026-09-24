@@ -11,9 +11,9 @@ npm install
 npm run dev
 ```
 
-## Planned data sources
+## Data source
 
-- [CelesTrak](https://celestrak.org/) for current GP orbital data
+- [CelesTrak GP API](https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json) for current active-object orbital data. The browser requests this public endpoint directly, so no visitor login or API key is needed.
 - [Launch Library 2](https://thespacedevs.com/llapi) for launch history
 - NASA and ESA publications for orbital debris and re-entry research
 
