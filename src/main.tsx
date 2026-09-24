@@ -1,6 +1,9 @@
-import { StrictMode, useEffect, useMemo, useRef, useState } from 'react'
+import { StrictMode, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import gsap from 'gsap'
+import { geoGraticule10, geoOrthographic, geoPath, type GeoProjection } from 'd3-geo'
+import { feature } from 'topojson-client'
+import world from 'world-atlas/countries-110m.json'
 import { eciToGeodetic, gstime, propagate, twoline2satrec, type SatRec } from 'satellite.js'
 import './styles.css'
 
@@ -23,6 +26,7 @@ const CATALOG_URL = (id: number) => `https://celestrak.org/NORAD/elements/gp.php
 const TLE_URL = (id: number) => `https://celestrak.org/NORAD/elements/gp.php?CATNR=${id}&FORMAT=tle`
 const EARTH_RADIUS_KM = 6378.137
 const EARTH_GRAVITATIONAL_PARAMETER = 398600.4418
+const WORLD_FEATURE = feature(world as never, world.objects.countries as never)
 
 function altitudeKm(meanMotion: number) {
   const semiMajorAxis = Math.cbrt(EARTH_GRAVITATIONAL_PARAMETER / ((meanMotion * 2 * Math.PI / 86400) ** 2))
@@ -45,8 +49,43 @@ function propagatePosition(item: OrbitalObject, date = new Date()): Position | n
   }
 }
 
-function markerStyle(position: Position) {
-  return { left: `${50 + position.longitude / 3.6}%`, top: `${50 - position.latitude / 1.8}%` }
+function fetchObject(id: number) {
+  return Promise.all([fetch(CATALOG_URL(id)), fetch(TLE_URL(id))]).then(async ([catalogResponse, tleResponse]) => {
+    if (!catalogResponse.ok || !tleResponse.ok) throw new Error(`NORAD ${id} returned an HTTP error`)
+    const catalog = (await catalogResponse.json() as OrbitalObject[])[0]
+    const tleLines = (await tleResponse.text()).trim().split(/\r?\n/)
+    if (!catalog || tleLines.length < 3) throw new Error(`NORAD ${id} returned incomplete orbital data`)
+    return { ...catalog, tle1: tleLines[1], tle2: tleLines[2] }
+  })
+}
+
+function WorldGlobe({ objects, positions, selected, onSelect }: { objects: OrbitalObject[]; positions: Record<number, Position>; selected: OrbitalObject | null; onSelect: (item: OrbitalObject) => void }) {
+  const [rotation, setRotation] = useState<[number, number, number]>([0, -18, 0])
+  const dragStart = useRef<{ x: number; y: number; rotation: [number, number, number] } | null>(null)
+  const projection = geoOrthographic().rotate(rotation).translate([300, 300]).scale(278)
+  const path = geoPath(projection)
+  const graticule = path(geoGraticule10()) ?? ''
+  const project = (position: Position) => projection([position.longitude, position.latitude])
+  const handlePointerDown = (event: PointerEvent<SVGSVGElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    dragStart.current = { x: event.clientX, y: event.clientY, rotation }
+  }
+  const handlePointerMove = (event: PointerEvent<SVGSVGElement>) => {
+    if (!dragStart.current) return
+    setRotation([dragStart.current.rotation[0] + (event.clientX - dragStart.current.x) * 0.45, dragStart.current.rotation[1] - (event.clientY - dragStart.current.y) * 0.35, 0])
+  }
+  return <div className="globe-wrap"><svg className="globe-map" viewBox="0 0 600 600" role="img" aria-label="Draggable Earth map" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={() => { dragStart.current = null }} onPointerCancel={() => { dragStart.current = null }}>
+    <circle className="globe-surface" cx="300" cy="300" r="278" />
+    <path className="graticule" d={graticule} />
+    <path className="countries" d={path(WORLD_FEATURE) ?? ''} />
+    {objects.map((item) => {
+      const position = positions[item.NORAD_CAT_ID]
+      const point = position ? project(position) : null
+      if (!point || Math.hypot(point[0] - 300, point[1] - 300) > 278) return null
+      return <button className={`map-marker ${selected?.NORAD_CAT_ID === item.NORAD_CAT_ID ? 'selected' : ''}`} key={item.NORAD_CAT_ID} style={{ left: `${point[0] / 6}%`, top: `${point[1] / 6}%` }} title={item.OBJECT_NAME} onClick={() => onSelect(item)}><span /></button>
+    })}
+    <circle className="globe-edge" cx="300" cy="300" r="278" />
+  </svg><p className="globe-caption">Drag to rotate the world<br /><span>Live propagated positions · {new Date().toLocaleTimeString()}</span></p></div>
 }
 
 function App() {
@@ -60,14 +99,17 @@ function App() {
 
   useEffect(() => {
     Promise.all(NORAD_IDS.map(async (id) => {
-      const [catalogResponse, tleResponse] = await Promise.all([fetch(CATALOG_URL(id)), fetch(TLE_URL(id))])
-      if (!catalogResponse.ok || !tleResponse.ok) throw new Error(`CelesTrak could not load NORAD ${id}`)
-      const catalog = (await catalogResponse.json() as OrbitalObject[])[0]
-      const tleLines = (await tleResponse.text()).trim().split(/\r?\n/)
-      return { ...catalog, tle1: tleLines[1], tle2: tleLines[2] }
+      try {
+        return await fetchObject(id)
+      } catch (fetchError) {
+        console.warn(fetchError)
+        return null
+      }
     }))
       .then((data) => {
-        setObjects(data)
+        const loaded = data.filter((item): item is OrbitalObject => item !== null)
+        setObjects(loaded)
+        if (loaded.length < NORAD_IDS.length) setError(`${NORAD_IDS.length - loaded.length} object(s) could not be loaded; showing the records that responded.`)
         setStatus('ready')
       })
       .catch((fetchError: Error) => {
@@ -115,13 +157,7 @@ function App() {
           <a className="cta" href="#explore">Inspect the watchlist <span>↓</span></a>
         </div>
         <div className="globe-wrap">
-          <div className="globe">
-            <div className="latitude latitude-one" /><div className="latitude latitude-two" /><div className="longitude longitude-one" /><div className="longitude longitude-two" />
-            {objects.map((item) => positions[item.NORAD_CAT_ID] && <button className={`globe-marker ${selected?.NORAD_CAT_ID === item.NORAD_CAT_ID ? 'selected' : ''}`} key={item.NORAD_CAT_ID} style={markerStyle(positions[item.NORAD_CAT_ID])} title={item.OBJECT_NAME} onClick={() => setSelected(item)}><span /></button>)}
-            <div className="globe-shine" />
-          </div>
-          <span className="globe-label label-n">N</span><span className="globe-label label-s">S</span>
-          <p className="globe-caption">Live propagated positions<br /><span>{lastUpdated.toLocaleTimeString()}</span></p>
+          <WorldGlobe objects={objects} positions={positions} selected={selected} onSelect={setSelected} />
         </div>
       </section>
 
@@ -131,7 +167,7 @@ function App() {
           <p className="source-note">Source: <a href="https://celestrak.org/" target="_blank" rel="noreferrer">CelesTrak GP data</a><br />Refreshes every 5 seconds</p>
         </div>
         <div className="stats"><div><strong>{objects.length}</strong><span>selected objects</span></div><div><strong>{Object.keys(positions).length}</strong><span>positions available</span></div><div><strong>{averageAltitude.toLocaleString()} km</strong><span>mean altitude</span></div><div><strong>{lastUpdated.toLocaleTimeString()}</strong><span>last calculation</span></div></div>
-        {status === 'error' && <div className="error">Could not load live CelesTrak data: {error}. Check your connection and try again.</div>}
+        {error && <div className="error">{status === 'error' ? `Could not load live CelesTrak data: ${error}` : error}</div>}
         {status === 'loading' ? <div className="loading">Fetching ten TLE records<span>···</span></div> : <div className="object-grid">{objects.map((item) => <button className={`object-card ${selected?.NORAD_CAT_ID === item.NORAD_CAT_ID ? 'active-card' : ''}`} key={item.NORAD_CAT_ID} onClick={() => setSelected(item)}><span className="type-dot" /><strong>{item.OBJECT_NAME}</strong><small>NORAD {item.NORAD_CAT_ID} · {positions[item.NORAD_CAT_ID]?.altitude.toFixed(0) ?? '—'} km altitude</small></button>)}</div>}
         <p className="result-note">Tracking only the 10 NORAD catalog IDs supplied for this phase. “Right now” is an estimate propagated from each object’s latest published TLE.</p>
       </section>
