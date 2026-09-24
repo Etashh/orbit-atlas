@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import gsap from 'gsap'
-import { geoGraticule10, geoOrthographic, geoPath, type GeoProjection } from 'd3-geo'
+import { geoGraticule10, geoOrthographic, geoPath } from 'd3-geo'
 import { feature } from 'topojson-client'
 import world from 'world-atlas/countries-110m.json'
 import { eciToGeodetic, gstime, propagate, twoline2satrec, type SatRec } from 'satellite.js'
@@ -59,13 +59,31 @@ function fetchObject(id: number) {
   })
 }
 
-function WorldGlobe({ objects, positions, selected, onSelect }: { objects: OrbitalObject[]; positions: Record<number, Position>; selected: OrbitalObject | null; onSelect: (item: OrbitalObject) => void }) {
+function WorldGlobe({ objects, positions, selected, onSelect, simulationTime }: { objects: OrbitalObject[]; positions: Record<number, Position>; selected: OrbitalObject | null; onSelect: (item: OrbitalObject) => void; simulationTime: Date }) {
   const [rotation, setRotation] = useState<[number, number, number]>([0, -18, 0])
   const dragStart = useRef<{ x: number; y: number; rotation: [number, number, number] } | null>(null)
   const projection = geoOrthographic().rotate(rotation).translate([300, 300]).scale(278)
   const path = geoPath(projection)
   const graticule = path(geoGraticule10()) ?? ''
   const project = (position: Position) => projection([position.longitude, position.latitude])
+  const trailFor = (item: OrbitalObject) => {
+    const segments: string[] = []
+    let segment: string[] = []
+    for (let minutes = 0; minutes <= 100; minutes += 2) {
+      const point = propagatePosition(item, new Date(simulationTime.getTime() + minutes * 60000))
+      const projected = point ? project(point) : null
+      if (projected && Math.hypot(projected[0] - 300, projected[1] - 300) <= 278) {
+        segment.push(`${projected[0]},${projected[1]}`)
+      } else if (segment.length > 1) {
+        segments.push(segment.join(' '))
+        segment = []
+      } else {
+        segment = []
+      }
+    }
+    if (segment.length > 1) segments.push(segment.join(' '))
+    return segments
+  }
   const handlePointerDown = (event: PointerEvent<SVGSVGElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
     dragStart.current = { x: event.clientX, y: event.clientY, rotation }
@@ -78,11 +96,12 @@ function WorldGlobe({ objects, positions, selected, onSelect }: { objects: Orbit
     <circle className="globe-surface" cx="300" cy="300" r="278" />
     <path className="graticule" d={graticule} />
     <path className="countries" d={path(WORLD_FEATURE) ?? ''} />
+    {objects.map((item) => trailFor(item).map((points, index) => <polyline className="orbit-trail" key={`${item.NORAD_CAT_ID}-${index}`} points={points} />))}
     {objects.map((item) => {
       const position = positions[item.NORAD_CAT_ID]
       const point = position ? project(position) : null
       if (!point || Math.hypot(point[0] - 300, point[1] - 300) > 278) return null
-      return <button className={`map-marker ${selected?.NORAD_CAT_ID === item.NORAD_CAT_ID ? 'selected' : ''}`} key={item.NORAD_CAT_ID} style={{ left: `${point[0] / 6}%`, top: `${point[1] / 6}%` }} title={item.OBJECT_NAME} onClick={() => onSelect(item)}><span /></button>
+      return <g className={`map-marker ${selected?.NORAD_CAT_ID === item.NORAD_CAT_ID ? 'selected' : ''}`} key={item.NORAD_CAT_ID} transform={`translate(${point[0]} ${point[1]})`} role="button" tabIndex={0} aria-label={`Select ${item.OBJECT_NAME}`} onClick={() => onSelect(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelect(item) }}><circle className="marker-halo" r="11" /><circle className="marker-core" r="4" /><text x="9" y="3">{item.NORAD_CAT_ID}</text></g>
     })}
     <circle className="globe-edge" cx="300" cy="300" r="278" />
   </svg><p className="globe-caption">Drag to rotate the world<br /><span>Live propagated positions · {new Date().toLocaleTimeString()}</span></p></div>
@@ -95,6 +114,8 @@ function App() {
   const [status, setStatus] = useState<Status>('loading')
   const [error, setError] = useState('')
   const [lastUpdated, setLastUpdated] = useState(new Date())
+  const [timeOffsetMinutes, setTimeOffsetMinutes] = useState(0)
+  const [playing, setPlaying] = useState(false)
   const heroRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -110,7 +131,7 @@ function App() {
 
   useEffect(() => {
     const updatePositions = () => {
-      const now = new Date()
+      const now = new Date(Date.now() + timeOffsetMinutes * 60000)
       const next: Record<number, Position> = {}
       objects.forEach((item) => {
         const position = propagatePosition(item, now)
@@ -122,7 +143,13 @@ function App() {
     updatePositions()
     const interval = window.setInterval(updatePositions, 5000)
     return () => window.clearInterval(interval)
-  }, [objects])
+  }, [objects, timeOffsetMinutes])
+
+  useEffect(() => {
+    if (!playing) return
+    const interval = window.setInterval(() => setTimeOffsetMinutes((offset) => offset >= 100 ? 0 : offset + 1), 100)
+    return () => window.clearInterval(interval)
+  }, [playing])
 
   useEffect(() => {
     if (!heroRef.current) return
@@ -147,7 +174,8 @@ function App() {
           <a className="cta" href="#explore">Inspect the watchlist <span>↓</span></a>
         </div>
         <div className="globe-wrap">
-          <WorldGlobe objects={objects} positions={positions} selected={selected} onSelect={setSelected} />
+          <WorldGlobe objects={objects} positions={positions} selected={selected} onSelect={setSelected} simulationTime={lastUpdated} />
+          <div className="time-control"><button onClick={() => setPlaying((value) => !value)}>{playing ? 'Pause' : 'Play path'}</button><input type="range" min="0" max="100" value={timeOffsetMinutes} onChange={(event) => setTimeOffsetMinutes(Number(event.target.value))} /><span>{timeOffsetMinutes === 0 ? 'NOW' : `+${timeOffsetMinutes} MIN`}</span></div>
         </div>
       </section>
 
