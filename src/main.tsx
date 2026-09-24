@@ -26,7 +26,7 @@ const CATALOG_URL = (id: number) => `https://celestrak.org/NORAD/elements/gp.php
 const TLE_URL = (id: number) => `https://celestrak.org/NORAD/elements/gp.php?CATNR=${id}&FORMAT=tle`
 const EARTH_RADIUS_KM = 6378.137
 const EARTH_GRAVITATIONAL_PARAMETER = 398600.4418
-const WORLD_FEATURE = feature(world as never, world.objects.countries as never)
+const WORLD_FEATURE = feature(world as never, world.objects.countries as never) as never
 
 function altitudeKm(meanMotion: number) {
   const semiMajorAxis = Math.cbrt(EARTH_GRAVITATIONAL_PARAMETER / ((meanMotion * 2 * Math.PI / 86400) ** 2))
@@ -98,23 +98,13 @@ function App() {
   const heroRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    Promise.all(NORAD_IDS.map(async (id) => {
-      try {
-        return await fetchObject(id)
-      } catch (fetchError) {
-        console.warn(fetchError)
-        return null
-      }
-    }))
-      .then((data) => {
-        const loaded = data.filter((item): item is OrbitalObject => item !== null)
+    Promise.allSettled(NORAD_IDS.map(fetchObject))
+      .then((results) => {
+        const loaded = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
         setObjects(loaded)
         if (loaded.length < NORAD_IDS.length) setError(`${NORAD_IDS.length - loaded.length} object(s) could not be loaded; showing the records that responded.`)
-        setStatus('ready')
-      })
-      .catch((fetchError: Error) => {
-        setError(fetchError.message)
-        setStatus('error')
+        setStatus(loaded.length ? 'ready' : 'error')
+        if (!loaded.length) setError('CelesTrak returned no usable records for this watchlist.')
       })
   }, [])
 
